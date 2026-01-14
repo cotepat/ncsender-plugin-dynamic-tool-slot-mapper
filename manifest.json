@@ -1,0 +1,15 @@
+{
+  "id": "com.ncsender.dynamic-tool-slot-mapper",
+  "name": "Dynamic Tool Slot Mapper",
+  "version": "1.0.0",
+  "minAppVersion": "0.3.131",
+  "author": "ncSender",
+  "description": "Just-in-time tool slot mapping for unlimited tool libraries with limited magazine capacity",
+  "entry": "index.js",
+  "icon": "logo.png",
+  "category": "utility",
+  "repository": "https://github.com/cotepat/ncsender-plugin-dynamic-tool-slot-mapper",
+  "priority": 140,
+  "events": ["onGcodeProgramLoad"],
+  "permissions": ["gcode.modify"]
+}

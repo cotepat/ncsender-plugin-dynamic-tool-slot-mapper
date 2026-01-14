@@ -1,0 +1,68 @@
+name: Release Plugin
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - name: Get version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+      
+      - name: Verify version matches manifest
+        run: |
+          MANIFEST_VERSION=$(node -p "require('./manifest.json').version")
+          if [ "$MANIFEST_VERSION" != "${{ steps.get_version.outputs.VERSION }}" ]; then
+            echo "Error: Tag version (${{ steps.get_version.outputs.VERSION }}) doesn't match manifest.json ($MANIFEST_VERSION)"
+            exit 1
+          fi
+      
+      - name: Package plugin
+        run: |
+          chmod +x .scripts/package.sh
+          .scripts/package.sh
+      
+      - name: Get plugin package name
+        id: package_name
+        run: |
+          PLUGIN_ID=$(node -p "require('./manifest.json').id")
+          VERSION=$(node -p "require('./manifest.json').version")
+          echo "PACKAGE_NAME=${PLUGIN_ID}-v${VERSION}.zip" >> $GITHUB_OUTPUT
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ steps.package_name.outputs.PACKAGE_NAME }}
+          body: |
+            ## Dynamic Tool Slot Mapper v${{ steps.get_version.outputs.VERSION }}
+            
+            Just-in-time tool slot mapping for unlimited tool libraries with limited magazine capacity.
+            
+            ### Installation
+            1. Download the `.zip` file below
+            2. In ncSender: **Settings → Plugins → Install Plugin**
+            3. Select the downloaded file
+            4. Restart ncSender if prompted
+            
+            ### What's New
+            See [README.md](https://github.com/${{ github.repository }}) for full details.
+            
+            ### Requirements
+            - ncSender 0.3.131 or higher
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

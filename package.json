@@ -1,0 +1,28 @@
+{
+  "name": "ncsender-plugin-dynamic-tool-slot-mapper",
+  "version": "1.0.0",
+  "description": "Just-in-time tool slot mapping for unlimited tool libraries with limited magazine capacity",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "node .scripts/test-package.sh",
+    "package": "node .scripts/package.sh"
+  },
+  "keywords": [
+    "ncsender",
+    "plugin",
+    "gcode",
+    "translation",
+    "atc",
+    "tool-changer",
+    "slot-management",
+    "dynamic-mapping",
+    "just-in-time"
+  ],
+  "author": "ncSender",
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cotepat/ncsender-plugin-dynamic-tool-slot-mapper"
+  }
+}
