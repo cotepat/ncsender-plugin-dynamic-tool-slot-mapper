@@ -1,7 +1,7 @@
 {
   "id": "com.ncsender.dynamic-tool-slot-mapper",
   "name": "Dynamic Tool Slot Mapper",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "minAppVersion": "0.3.131",
   "author": "ncSender",
   "description": "Just-in-time tool slot mapping for unlimited tool libraries with limited magazine capacity",

@@ -12,7 +12,7 @@
  * - Unknown tool handling with temporary session mappings
  * - Automatic G-code translation (e.g., T84 M6 → T6 M6)
  * 
- * Version: 1.0.0
+ * Version: 1.0.1
  */
 
 // Plugin context reference
@@ -20,6 +20,26 @@ let pluginContext = null;
 
 // Node.js modules (available in server-side code)
 let fs, path, os;
+
+/**
+ * Get the user data directory based on platform (matches ncSender's implementation)
+ * @returns {string} Path to user data directory
+ */
+function getUserDataDir() {
+  const platform = os.platform();
+  const appName = 'ncSender';
+
+  switch (platform) {
+    case 'win32':
+      return path.join(os.homedir(), 'AppData', 'Roaming', appName);
+    case 'darwin':
+      return path.join(os.homedir(), 'Library', 'Application Support', appName);
+    case 'linux':
+      return path.join(os.homedir(), '.config', appName);
+    default:
+      return path.join(os.homedir(), `.${appName}`);
+  }
+}
 
 /**
  * Initialize the module with plugin context
@@ -221,8 +241,7 @@ async function getMagazineSize() {
       os = osModule.default;
     }
     
-    const homeDir = os.homedir();
-    const dataDir = path.join(homeDir, 'Library', 'Application Support', 'ncSender');
+    const dataDir = getUserDataDir();
     const settingsPath = path.join(dataDir, 'settings.json');
     
     if (!fs.existsSync(settingsPath)) {
@@ -277,10 +296,11 @@ async function showStatusDialog(filename, toolChanges, status, content, lines, t
         }
       }
       
+      const toolIdForComparison = toolInSlot ? (toolInSlot.toolId || toolInSlot.id) : null;
       slotState.push({
         slotNumber: i,
         tool: toolInSlot || null,
-        isUsed: toolInSlot && (usedToolNumbers.has(toolInSlot.toolId) || usedToolNumbers.has(parseInt(toolInSlot.toolId)))
+        isUsed: toolInSlot && toolIdForComparison && (usedToolNumbers.has(parseInt(toolIdForComparison)) || usedToolNumbers.has(toolIdForComparison))
       });
     }
     
@@ -876,14 +896,17 @@ async function showStatusDialog(filename, toolChanges, status, content, lines, t
         
         <!-- Slot Carousel -->
         <div class="slot-carousel-section">
-          ${slotState.map(slot => `
+          ${slotState.map(slot => {
+            const toolId = slot.tool ? (slot.tool.toolId || slot.tool.id) : null;
+            return `
             <div class="slot-box ${slot.tool ? (slot.isUsed ? 'slot-box--used' : 'slot-box--unused') : ''}">
               <div class="slot-box-content">
-                ${slot.tool ? `<span class="slot-tool-id">#${slot.tool.toolId}</span>` : `<span class="slot-empty">—</span>`}
+                ${toolId ? `<span class="slot-tool-id">#${toolId}</span>` : `<span class="slot-empty">—</span>`}
               </div>
               <div class="slot-box-label">SLOT${slot.slotNumber}</div>
             </div>
-          `).join('')}
+            `;
+          }).join('')}
         </div>
         
         <!-- Tools Table -->
@@ -950,7 +973,11 @@ async function showStatusDialog(filename, toolChanges, status, content, lines, t
           const allToolsData = ${JSON.stringify(allToolsForTable)};
           const magazineSize = ${magazineSize};
           const toolLibrary = ${JSON.stringify(Object.fromEntries(
-            Object.values(toolLibrary).map(t => [t.toolId, t])
+            Object.values(toolLibrary).map(t => {
+              // Ensure toolId is set for consistent access
+              const toolId = t.toolId !== undefined ? t.toolId : t.id;
+              return [toolId, { ...t, toolId: toolId }];
+            })
           ))};
           
           let currentTool = null;
@@ -976,13 +1003,14 @@ async function showStatusDialog(filename, toolChanges, status, content, lines, t
               // Check for unknown tool (session mapping) in this slot
               const unknownToolInSlot = Object.keys(sessionMappings).find(key => sessionMappings[key] === i);
               
-              const isOccupied = (toolInSlot && toolInSlot.toolId !== toolData.toolNumber) || 
+              const toolInSlotId = toolInSlot ? (toolInSlot.toolId || toolInSlot.id) : null;
+              const isOccupied = (toolInSlot && toolInSlotId !== toolData.toolNumber) || 
                                  (unknownToolInSlot && parseInt(unknownToolInSlot) !== toolData.toolNumber);
               const isActive = toolData.pocketNumber === i;
               
               let occupiedInfo = '';
-              if (toolInSlot && toolInSlot.toolId !== toolData.toolNumber) {
-                occupiedInfo = \` (Swap with #\${toolInSlot.toolId})\`;
+              if (toolInSlot && toolInSlotId !== toolData.toolNumber) {
+                occupiedInfo = \` (Swap with #\${toolInSlotId})\`;
               } else if (unknownToolInSlot && parseInt(unknownToolInSlot) !== toolData.toolNumber) {
                 occupiedInfo = \` (Swap with T\${unknownToolInSlot})\`;
               }
@@ -1029,7 +1057,8 @@ async function showStatusDialog(filename, toolChanges, status, content, lines, t
             try {
               if (toolInfo) {
                 // Tool in library - update it (persists)
-                console.log(\`[Slot] Updating tool #\${toolInfo.toolId} from Slot \${oldSlotNumber || 'none'} → Slot \${slotNumber || 'none'}\`);
+                const currentToolId = toolInfo.toolId || toolInfo.id;
+                console.log(\`[Slot] Updating tool #\${currentToolId} from Slot \${oldSlotNumber || 'none'} → Slot \${slotNumber || 'none'}\`);
                 
                 // Check if target slot is occupied by another tool (in library OR session mapping)
                 const conflictingTool = slotNumber !== null
@@ -1044,7 +1073,8 @@ async function showStatusDialog(filename, toolChanges, status, content, lines, t
                 if (conflictingTool) {
                   // 3-step swap process with library tool (matching ncSender behavior):
                   // Step 1: Unassign conflicting tool temporarily
-                  console.log(\`[Slot] Step 1: Unassigning #\${conflictingTool.toolId} from Slot \${slotNumber}\`);
+                  const conflictingToolId = conflictingTool.toolId || conflictingTool.id;
+                  console.log(\`[Slot] Step 1: Unassigning #\${conflictingToolId} from Slot \${slotNumber}\`);
                   await fetch(\`/api/tools/\${conflictingTool.id}\`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
@@ -1052,7 +1082,7 @@ async function showStatusDialog(filename, toolChanges, status, content, lines, t
                   });
                   
                   // Step 2: Assign current tool to new slot
-                  console.log(\`[Slot] Step 2: Assigning #\${toolInfo.toolId} to Slot \${slotNumber}\`);
+                  console.log(\`[Slot] Step 2: Assigning #\${currentToolId} to Slot \${slotNumber}\`);
                   await fetch(\`/api/tools/\${toolInfo.id}\`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
@@ -1061,7 +1091,7 @@ async function showStatusDialog(filename, toolChanges, status, content, lines, t
                   
                   // Step 3: Assign conflicting tool to old slot (complete the swap)
                   if (oldSlotNumber !== null) {
-                    console.log(\`[Slot] Step 3: Assigning #\${conflictingTool.toolId} to Slot \${oldSlotNumber}\`);
+                    console.log(\`[Slot] Step 3: Assigning #\${conflictingToolId} to Slot \${oldSlotNumber}\`);
                     await fetch(\`/api/tools/\${conflictingTool.id}\`, {
                       method: 'PUT',
                       headers: { 'Content-Type': 'application/json' },
@@ -1082,7 +1112,7 @@ async function showStatusDialog(filename, toolChanges, status, content, lines, t
                   }
                   
                   // Assign current tool to new slot
-                  console.log(\`[Slot] Assigning #\${toolInfo.toolId} to Slot \${slotNumber}\`);
+                  console.log(\`[Slot] Assigning #\${currentToolId} to Slot \${slotNumber}\`);
                   await fetch(\`/api/tools/\${toolInfo.id}\`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
@@ -1090,7 +1120,7 @@ async function showStatusDialog(filename, toolChanges, status, content, lines, t
                   });
                 } else {
                   // Simple assignment, no swap needed
-                  console.log(\`[Slot] Simple assignment: #\${toolInfo.toolId} → Slot \${slotNumber || 'none'}\`);
+                  console.log(\`[Slot] Simple assignment: #\${currentToolId} → Slot \${slotNumber || 'none'}\`);
                   await fetch(\`/api/tools/\${toolInfo.id}\`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
@@ -1116,7 +1146,8 @@ async function showStatusDialog(filename, toolChanges, status, content, lines, t
                   
                   if (conflictingTool) {
                     // Swap with library tool
-                    console.log(\`[Slot] Swapping unknown tool T\${toolNumber} with library tool #\${conflictingTool.toolId}\`);
+                    const swapConflictingToolId = conflictingTool.toolId || conflictingTool.id;
+                    console.log(\`[Slot] Swapping unknown tool T\${toolNumber} with library tool #\${swapConflictingToolId}\`);
                     
                     // Update library tool
                     if (oldSlotNumber !== null) {
@@ -1152,6 +1183,9 @@ async function showStatusDialog(filename, toolChanges, status, content, lines, t
                   }
                 }
               }
+              
+              // Wait a moment for API changes to persist to disk before refreshing
+              await new Promise(resolve => setTimeout(resolve, 100));
               
               // Refresh dialog
               window.parent.postMessage({
@@ -1239,8 +1273,7 @@ async function syncToolLibraryWithMappings(toolChanges, ctx) {
       os = osModule.default;
     }
     
-    const homeDir = os.homedir();
-    const dataDir = path.join(homeDir, 'Library', 'Application Support', 'ncSender');
+    const dataDir = getUserDataDir();
     const toolsPath = path.join(dataDir, 'tools.json');
     
     if (!fs.existsSync(toolsPath)) {
@@ -1412,9 +1445,10 @@ async function loadToolLibrary() {
       os = osModule.default;
     }
     
-    const homeDir = os.homedir();
-    const dataDir = path.join(homeDir, 'Library', 'Application Support', 'ncSender');
+    const dataDir = getUserDataDir();
     const toolsPath = path.join(dataDir, 'tools.json');
+    
+    pluginContext.log(`Loading tool library from: ${toolsPath} (Platform: ${os.platform()})`);
     
     if (!fs.existsSync(toolsPath)) {
       pluginContext.log('Tools file does not exist');
@@ -1434,6 +1468,10 @@ async function loadToolLibrary() {
       // Handle migration: if toolId is missing, use id as fallback (for old tools)
       const toolId = tool.toolId !== undefined ? tool.toolId : tool.id;
       if (toolId !== undefined) {
+        // Ensure toolId property exists on the tool object for consistent access
+        if (tool.toolId === undefined && tool.id !== undefined) {
+          tool.toolId = tool.id;
+        }
         library[toolId] = tool;
       }
     });
@@ -1456,7 +1494,7 @@ export function onLoad(ctx) {
   // Register G-code translation handler
   registerHandler(ctx);
   
-  ctx.log('Dynamic Tool Slot Mapper v1.0.0 loaded');
+  ctx.log('Dynamic Tool Slot Mapper v1.0.1 loaded');
 }
 
 /**

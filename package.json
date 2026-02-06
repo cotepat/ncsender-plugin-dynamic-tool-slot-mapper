@@ -1,6 +1,6 @@
 {
   "name": "ncsender-plugin-dynamic-tool-slot-mapper",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Just-in-time tool slot mapping for unlimited tool libraries with limited magazine capacity",
   "main": "index.js",
   "type": "module",
