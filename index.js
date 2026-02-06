@@ -12,7 +12,7 @@
  * - Unknown tool handling with temporary session mappings
  * - Automatic G-code translation (e.g., T84 M6 → T6 M6)
  * 
- * Version: 1.0.1
+ * Version: 1.0.2
  */
 
 // Plugin context reference
@@ -1373,9 +1373,9 @@ function performTranslation(lines, toolChanges, ctx) {
         const pocketNumber = translationMap[toolNumber];
         
         if (pocketNumber !== undefined) {
-          // Replace T## with T# [Fusion: tool ##]
+          // Replace T## with T# [Original: tool ##]
           const translatedLine = line.replace(/T(\d+)/i, (match, num) => {
-            return `T${pocketNumber} [Fusion: tool ${num}]`;
+            return `T${pocketNumber} [Original: tool ${num}]`;
           });
           commentTranslationCount++;
           return translatedLine;
@@ -1494,7 +1494,7 @@ export function onLoad(ctx) {
   // Register G-code translation handler
   registerHandler(ctx);
   
-  ctx.log('Dynamic Tool Slot Mapper v1.0.1 loaded');
+  ctx.log('Dynamic Tool Slot Mapper v1.0.2 loaded');
 }
 
 /**
