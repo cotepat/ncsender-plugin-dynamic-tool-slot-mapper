@@ -22,7 +22,7 @@ mkdir -p "$PLUGIN_DIR"
 # Copy plugin files to plugin directory
 echo "Copying plugin files..."
 cp manifest.json "$PLUGIN_DIR/"
-cp index.js "$PLUGIN_DIR/"
+cp commands.js "$PLUGIN_DIR/"
 cp logo.png "$PLUGIN_DIR/"
 
 # Note: README.md, QUICKSTART.md, and docs/ are excluded to avoid issues

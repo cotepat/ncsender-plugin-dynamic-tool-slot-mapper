@@ -63,7 +63,7 @@ jobs:
             See [README.md](https://github.com/${{ github.repository }}) for full details.
             
             ### Requirements
-            - ncSender 0.3.131 or higher
+            - ncSender 2.0.37+ (OSS) or ncSender Pro 2.0.88+
           draft: false
           prerelease: false
         env:

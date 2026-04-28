@@ -45,14 +45,6 @@ If you have tools in G-code that aren't in your library:
 2. Click **"Map Tools"** to translate and proceed
 3. Or click **"Bypass Mapping"** to skip translation
 
-## Settings
-
-**Settings → Plugins → Dynamic Tool Slot Mapper**
-
-- **Enable Automatic Tool Number <-> ATC Slot Mapping**
-  - ✅ Enabled: Translates tool numbers (T84 → T6)
-  - ❌ Disabled: Passes through original numbers
-
 ## Tips
 
 - **Smart Swapping**: The plugin handles all slot conflicts automatically
@@ -67,6 +59,7 @@ If you have tools in G-code that aren't in your library:
 **Dialog doesn't appear when loading G-code:**
 - Check that the plugin is enabled in Settings → Plugins
 - Verify G-code contains tool changes (M6 commands)
+- Confirm you're on ncSender 2.0.37+ (OSS) or 2.0.88+ (Pro) — this plugin requires `pluginContext.getTools()` which was added in those releases
 
 **Can't assign a slot:**
 - Click the tool row to open dropdown

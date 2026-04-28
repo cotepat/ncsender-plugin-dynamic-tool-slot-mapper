@@ -7,7 +7,7 @@ Thank you for your interest in contributing! This document provides guidelines a
 ### Prerequisites
 
 - Node.js 18+ (for running build scripts)
-- ncSender 0.3.131+ (for testing)
+- ncSender 2.0.37+ (OSS) or ncSender Pro 2.0.88+ (for testing — `pro-v2` runtime)
 - Git
 
 ### Getting Started
@@ -18,44 +18,55 @@ Thank you for your interest in contributing! This document provides guidelines a
    cd ncsender-plugin-dynamic-tool-slot-mapper
    ```
 
-2. **Install dependencies** (if any)
-   ```bash
-   npm install
-   ```
-
-3. **Make your changes**
-   - Edit plugin files (`index.js`)
+2. **Make your changes**
+   - Edit `commands.js` (the entire plugin lives here)
    - Test in ncSender by installing the plugin locally
 
-4. **Test your changes**
+3. **Test your changes**
    ```bash
-   npm test
-   ```
-
-5. **Package the plugin**
-   ```bash
-   npm run package
+   .scripts/package.sh && .scripts/test-package.sh
    ```
 
 ## Plugin Structure
 
 ```
 ncsender-plugin-dynamic-tool-slot-mapper/
-├── manifest.json           # Plugin metadata
-├── index.js               # Main entry point (contains all plugin logic)
-├── logo.png               # Plugin icon
-├── package.json           # NPM metadata
-├── README.md              # Main documentation
-├── QUICKSTART.md          # Quick start guide
-├── CONTRIBUTING.md        # This file
-└── .scripts/              # Build scripts
-    ├── package.sh         # Package plugin as .zip
-    └── test-package.sh    # Verify package
+├── manifest.json           # Plugin metadata (declares commands + onGcodeProgramLoad event)
+├── commands.js             # Plugin logic (runs in v2 Jint sandbox)
+├── logo.png                # Plugin icon
+├── package.json            # NPM metadata
+├── README.md               # Main documentation
+├── QUICKSTART.md           # Quick start guide
+├── CONTRIBUTING.md         # This file
+└── .scripts/               # Build scripts
+    ├── package.sh          # Package plugin as .zip
+    └── test-package.sh     # Verify package
 ```
+
+## Runtime Notes (v2)
+
+`commands.js` runs inside ncSender v2's Jint engine, **not** Node.js. This means:
+
+- **No `import`/`require`** — Jint strips ESM `export {}` automatically; declare functions at top level
+- **No Node modules** — `fs`, `path`, `os` are unavailable
+- **Use `pluginContext`** (a global injected by the host):
+  - `pluginContext.log(...)` — server log
+  - `pluginContext.getTools()` — tool library (with `id`, `toolId`, `toolNumber`, `name`, `type`, `diameter`)
+  - `pluginContext.showDialog(title, html, opts)` — synchronous dialog; returns user response
+- Entry points are top-level functions: `buildInitialConfig`, `onGcodeProgramLoad`, `onBeforeCommand`, `onAfterJobEnd`
+- The dialog HTML is rendered inline by the client; relative `fetch('/api/...')` works against the local server
+
+## Plugin Development References
+
+ncSender v2 has no standalone plugin guide yet — the source itself is the spec:
+
+- [ncSender repository](https://github.com/siganberg/ncSender)
+- Plugin engine & host APIs: [`src/NcSender.Server/Plugins/JsPluginEngine.cs`](https://github.com/siganberg/ncSender/blob/main/src/NcSender.Server/Plugins/JsPluginEngine.cs)
+- Plugin loader & manifest schema: [`src/NcSender.Server/Plugins/PluginManager.cs`](https://github.com/siganberg/ncSender/blob/main/src/NcSender.Server/Plugins/PluginManager.cs)
+- Manifest model fields: [`src/NcSender.Core/Models/PluginModels.cs`](https://github.com/siganberg/ncSender/blob/main/src/NcSender.Core/Models/PluginModels.cs)
 
 ## Code Style
 
-- Use ES6 modules (`import`/`export`)
 - Follow existing code formatting
 - Add comments for complex logic
 - Keep functions focused and small
@@ -119,7 +130,7 @@ Releases are managed by the maintainers:
 
 1. Update version in `manifest.json` and `package.json`
 2. Update `README.md` with new version number
-3. Create git tag (`v1.x.x`)
+3. Create git tag (`v2.x.x`)
 4. Push tag to trigger GitHub Actions
 5. GitHub Actions builds and publishes release
 
