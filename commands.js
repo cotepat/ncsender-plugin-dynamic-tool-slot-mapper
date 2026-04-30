@@ -62,6 +62,7 @@ function onGcodeProgramLoad(content, context, settings) {
     // the cached version with the transformed one a moment later.
     showStatusDialog(
       context && context.filename,
+      context && context.sourcePath,
       toolChanges,
       status,
       toolLibrary,
@@ -201,7 +202,7 @@ function determineStatus(toolChanges) {
 
 // === Status dialog ===
 
-function showStatusDialog(filename, toolChanges, status, toolLibrary, sessionMappings) {
+function showStatusDialog(filename, sourcePath, toolChanges, status, toolLibrary, sessionMappings) {
   sessionMappings = sessionMappings || {};
 
   const allToolsForTable = []
@@ -519,6 +520,8 @@ function showStatusDialog(filename, toolChanges, status, toolLibrary, sessionMap
         const sessionMappings = ${JSON.stringify(sessionMappings)};
         const allToolsData = ${JSON.stringify(allToolsForTable)};
         const toolLibrary = ${JSON.stringify(dialogToolLibrary)};
+        const sourcePath = ${JSON.stringify(sourcePath || '')};
+        const filename = ${JSON.stringify(filename || 'translated.gcode')};
         let magazineSize = 0;
 
         const overlay = document.getElementById('slotSelectorOverlay');
@@ -954,17 +957,25 @@ function showStatusDialog(filename, toolChanges, status, toolLibrary, sessionMap
           mapBtn.textContent = 'Translating…';
 
           try {
-            const r = await fetch('/api/gcode-files/current/download');
-            if (!r.ok) throw new Error('Failed to download G-code: HTTP ' + r.status);
-            const content = await r.text();
+            // Fetch the file we are currently loading. We canNOT use
+            // /api/gcode-files/current/download here — that serves from the
+            // cache, which still contains the *previously* loaded file
+            // because the plugin is blocking the current load by showing
+            // this dialog. Instead, read fresh from disk via sourcePath.
+            let content;
+            if (sourcePath) {
+              const r = await fetch('/api/gcode-files/file?path=' + encodeURIComponent(sourcePath));
+              if (!r.ok) throw new Error('Failed to fetch source file: HTTP ' + r.status);
+              const data = await r.json();
+              content = data.content;
+            } else {
+              // Fallback for paths where we don't have a sourcePath (rare).
+              const r = await fetch('/api/gcode-files/current/download');
+              if (!r.ok) throw new Error('Failed to download G-code: HTTP ' + r.status);
+              content = await r.text();
+            }
 
             const transformed = '${DTSM_MARKER}\\n' + performTranslationInBrowser(content);
-
-            // Look up current filename + sourceFile so load-temp gets the right metadata.
-            const stateRes = await fetch('/api/server-state');
-            const state = stateRes.ok ? await stateRes.json() : {};
-            const filename = (state.jobLoaded && state.jobLoaded.filename) || 'translated.gcode';
-            const sourceFile = (state.jobLoaded && state.jobLoaded.sourceFile) || null;
 
             // CRITICAL: schedule the load-temp upload via setTimeout(0) so it
             // fires AFTER the close-plugin-dialog message releases the engine
@@ -975,7 +986,7 @@ function showStatusDialog(filename, toolChanges, status, toolLibrary, sessionMap
               fetch('/api/gcode-files/load-temp', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content: transformed, filename: filename, sourceFile: sourceFile })
+                body: JSON.stringify({ content: transformed, filename: filename, sourceFile: sourcePath || null })
               }).catch(err => {
                 console.error('[DTSM dialog] Upload failed:', err);
               });
