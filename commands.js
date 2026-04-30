@@ -29,7 +29,20 @@ function onGcodeProgramLoad(content, context, settings) {
   // on unhandled JS exceptions. Always return original content on failure
   // (host sees a graceful fallback, user can still load the file untranslated).
   try {
-    safeLog('Dynamic Tool Slot Mapper: analyzing G-code...');
+    safeLog('Dynamic Tool Slot Mapper: analyzing G-code (' + Math.round(content.length / 1024) + ' KB)...');
+
+    // Jint's 50 MB memory cap means content + result + parsing overhead
+    // can't fit much past ~2 MB of input. Refuse upfront with a clear
+    // message rather than try, fail mid-translation, and leave the user
+    // with a silently-untranslated file.
+    const MAX_BYTES = 2_000_000;
+    if (content.length > MAX_BYTES) {
+      safeLog('File too large for in-Jint translation: '
+        + Math.round(content.length / 1024) + ' KB exceeds '
+        + (MAX_BYTES / 1024) + ' KB limit. Loading original G-code without translation. '
+        + '(Ask Francis to bump LimitMemory in JsPluginEngine.cs to fix this.)');
+      return content;
+    }
 
     let toolLibrary = loadToolLibrary();
     let manualMappings = {};
@@ -79,11 +92,12 @@ function onGcodeProgramLoad(content, context, settings) {
 }
 
 // safeLog never throws — even if pluginContext.log itself misbehaves we
-// silently drop the message rather than crash the plugin.
+// silently drop the message rather than crash the plugin. Prefix [DTSM]
+// for easy grepping in the host log alongside other plugins.
 function safeLog(msg) {
   try {
     if (typeof pluginContext !== 'undefined' && pluginContext && typeof pluginContext.log === 'function') {
-      pluginContext.log(msg);
+      pluginContext.log('[DTSM] ' + msg);
     }
   } catch (e) { /* swallow */ }
 }
