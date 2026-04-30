@@ -25,47 +25,67 @@ const M6_PATTERN = /(?:^|[^A-Z])M0*6(?:\s*T0*(\d+)|(?=[^0-9T])|$)|(?:^|[^A-Z])T0
 // === Entry point ===
 
 function onGcodeProgramLoad(content, context, settings) {
-  pluginContext.log('Dynamic Tool Slot Mapper: analyzing G-code...');
+  // Top-level try/catch is load-bearing: AOT-compiled hosts can crash hard
+  // on unhandled JS exceptions. Always return original content on failure
+  // (host sees a graceful fallback, user can still load the file untranslated).
+  try {
+    safeLog('Dynamic Tool Slot Mapper: analyzing G-code...');
 
-  let toolLibrary = loadToolLibrary();
-  let manualMappings = {};
-  let toolChanges = parseToolChanges(content, toolLibrary, manualMappings);
+    let toolLibrary = loadToolLibrary();
+    let manualMappings = {};
+    let toolChanges = parseToolChanges(content, toolLibrary, manualMappings);
 
-  if (toolChanges.allTools.length === 0) {
-    pluginContext.log('No tool changes found — loading original G-code');
+    if (toolChanges.allTools.length === 0) {
+      safeLog('No tool changes found — loading original G-code');
+      return content;
+    }
+
+    const status = determineStatus(toolChanges);
+
+    // Dialog handles slot swaps in-place via /api/tools — only returns
+    // 'map' or 'bypass'. We reparse with the final sessionMappings before
+    // translating so the dialog never has to round-trip back on each edit.
+    const userChoice = showStatusDialog(
+      context && context.filename,
+      toolChanges,
+      status,
+      toolLibrary,
+      manualMappings
+    );
+
+    const finalAction = typeof userChoice === 'string' ? userChoice : (userChoice && userChoice.action);
+
+    if (finalAction === 'bypass') {
+      safeLog('Tool mapping bypassed — loading original G-code');
+      return content;
+    }
+
+    // 'map': pick up the latest library state and any session mappings the user
+    // made in the dialog, then translate.
+    toolLibrary = loadToolLibrary();
+    if (userChoice && userChoice.sessionMappings !== undefined) {
+      manualMappings = userChoice.sessionMappings;
+    }
+    toolChanges = parseToolChanges(content, toolLibrary, manualMappings);
+
+    safeLog('Starting tool translation...');
+    return performTranslation(content, toolChanges);
+
+  } catch (e) {
+    const msg = e && e.message ? e.message : String(e);
+    safeLog('[DTSM] onGcodeProgramLoad failed: ' + msg);
     return content;
   }
+}
 
-  const status = determineStatus(toolChanges);
-
-  // Dialog handles slot swaps in-place via /api/tools — only returns
-  // 'map' or 'bypass'. We reparse with the final sessionMappings before
-  // translating so the dialog never has to round-trip back on each edit.
-  const userChoice = showStatusDialog(
-    context && context.filename,
-    toolChanges,
-    status,
-    toolLibrary,
-    manualMappings
-  );
-
-  const finalAction = typeof userChoice === 'string' ? userChoice : (userChoice && userChoice.action);
-
-  if (finalAction === 'bypass') {
-    pluginContext.log('Tool mapping bypassed — loading original G-code');
-    return content;
-  }
-
-  // 'map': pick up the latest library state and any session mappings the user
-  // made in the dialog, then translate.
-  toolLibrary = loadToolLibrary();
-  if (userChoice && userChoice.sessionMappings !== undefined) {
-    manualMappings = userChoice.sessionMappings;
-  }
-  toolChanges = parseToolChanges(content, toolLibrary, manualMappings);
-
-  pluginContext.log('Starting tool translation...');
-  return performTranslation(content, toolChanges);
+// safeLog never throws — even if pluginContext.log itself misbehaves we
+// silently drop the message rather than crash the plugin.
+function safeLog(msg) {
+  try {
+    if (typeof pluginContext !== 'undefined' && pluginContext && typeof pluginContext.log === 'function') {
+      pluginContext.log(msg);
+    }
+  } catch (e) { /* swallow */ }
 }
 
 // === G-code translation ===
@@ -120,7 +140,7 @@ function performTranslation(content, toolChanges) {
         out = out.replace(/T\d+/i, 'T' + pocketNumber);
         wasTranslated = true;
         if (M6_PATTERN.test(line)) {
-          pluginContext.log('  T' + toolNumber + ' → T' + pocketNumber);
+          safeLog('  T' + toolNumber + ' → T' + pocketNumber);
         }
       }
     }
@@ -139,7 +159,7 @@ function performTranslation(content, toolChanges) {
     return out;
   });
 
-  pluginContext.log('✓ Translated ' + translationCount + ' tool change(s) and ' + commentTranslationCount + ' comment(s)');
+  safeLog('✓ Translated ' + translationCount + ' tool change(s) and ' + commentTranslationCount + ' comment(s)');
   return result;
 }
 
@@ -167,7 +187,7 @@ function loadToolLibrary() {
     }
   });
 
-  pluginContext.log('Loaded ' + tools.length + ' tool(s) from library');
+  safeLog('Loaded ' + tools.length + ' tool(s) from library');
   return library;
 }
 
