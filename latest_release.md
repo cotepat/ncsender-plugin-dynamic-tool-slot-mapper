@@ -1,17 +1,28 @@
-# Dynamic Tool Slot Mapper v2.0.3
+# Dynamic Tool Slot Mapper v2.1.0
 
-## 🐛 Fixes
+## ✨ G-code translation now works on files of any size
 
-- **Logs are findable again** — restored the `[DTSM]` prefix on plugin log messages. Greppable as `[DTSM]` in the host log (`~/Library/Application Support/ncSender/logs/<date>.log` on macOS).
-- **Large G-code file guard** — files over 2 MB now bail out cleanly with a clear log message instead of silently failing mid-translation. Jint's 50 MB memory cap means large files exhaust available memory before translation can finish; until the host raises the cap, the plugin will load the original G-code untranslated and tell you why in the log.
+The plugin now does the heavy translation in the **browser** instead of inside Jint's 50 MB sandbox — same architecture Francis's `edge-align` plugin uses for big G-code transforms. 5 MB+ files translate without crashing or hitting memory limits.
 
-## What still works
+### How it works
 
-Files under 2 MB (typical for most CNC jobs, including 50k+ line files at <1 MB) translate normally with the in-place dialog refresh from v2.0.1.
+1. Plugin parses tool changes (lightweight, stays well under 50 MB) and shows the dialog as before
+2. Slot swaps refresh the carousel + table **in place** — no flicker (unchanged from v2.0.1)
+3. When you click **Map Tools**, the dialog:
+   - Downloads the current G-code via `/api/gcode-files/current/download`
+   - Transforms it in the browser (where memory is effectively unlimited)
+   - Adds a marker comment so the upload doesn't trigger a re-process loop
+   - Uploads the transformed content via `/api/gcode-files/load-temp`
+   - Closes
+4. Plugin returns the original content from `onGcodeProgramLoad`; the load-temp upload then replaces the cache with the translated version a moment later (brief flicker — file shows untranslated for ~500 ms before flipping to translated)
 
-## Known limitation
+### Limit removed
 
-Files larger than 2 MB skip translation. Slot assignments still persist in your tool library, so re-loading on the host with a future LimitMemory bump (or doing the slot mapping with a smaller file first) will work.
+- The 2 MB file-size guard from v2.0.3 is gone. There is no practical upper limit anymore.
+
+### Logs
+
+Same `[DTSM]` prefix as v2.0.3 — easy to grep in `~/Library/Application Support/ncSender/logs/<date>.log`.
 
 ## Requirements
 
@@ -20,4 +31,4 @@ Files larger than 2 MB skip translation. Slot assignments still persist in your 
 
 ---
 
-**Full Changelog**: https://github.com/cotepat/ncsender-plugin-dynamic-tool-slot-mapper/compare/v2.0.2...v2.0.3
+**Full Changelog**: https://github.com/cotepat/ncsender-plugin-dynamic-tool-slot-mapper/compare/v2.0.3...v2.1.0

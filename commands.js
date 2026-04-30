@@ -24,25 +24,25 @@ const M6_PATTERN = /(?:^|[^A-Z])M0*6(?:\s*T0*(\d+)|(?=[^0-9T])|$)|(?:^|[^A-Z])T0
 
 // === Entry point ===
 
+// Marker comment we add to the top of transformed G-code. When the dialog's
+// browser-side translation finishes, it uploads the transformed file via
+// /api/gcode-files/load-temp — that endpoint runs plugin transforms again,
+// which would re-fire this plugin in a loop. The marker breaks the loop:
+// if we see it, we know the content is already transformed and bail.
+const DTSM_MARKER = '; ncSender-dtsm-transformed';
+
 function onGcodeProgramLoad(content, context, settings) {
   // Top-level try/catch is load-bearing: AOT-compiled hosts can crash hard
   // on unhandled JS exceptions. Always return original content on failure
   // (host sees a graceful fallback, user can still load the file untranslated).
   try {
-    safeLog('Dynamic Tool Slot Mapper: analyzing G-code (' + Math.round(content.length / 1024) + ' KB)...');
-
-    // Jint's 50 MB memory cap means content + result + parsing overhead
-    // can't fit much past ~2 MB of input. Refuse upfront with a clear
-    // message rather than try, fail mid-translation, and leave the user
-    // with a silently-untranslated file.
-    const MAX_BYTES = 2_000_000;
-    if (content.length > MAX_BYTES) {
-      safeLog('File too large for in-Jint translation: '
-        + Math.round(content.length / 1024) + ' KB exceeds '
-        + (MAX_BYTES / 1024) + ' KB limit. Loading original G-code without translation. '
-        + '(Ask Francis to bump LimitMemory in JsPluginEngine.cs to fix this.)');
+    // Skip if this content was already transformed by us (marker on first line).
+    // Cheap check — only inspects the first ~80 chars.
+    if (content && content.length > 0 && content.substring(0, 80).indexOf(DTSM_MARKER) !== -1) {
       return content;
     }
+
+    safeLog('Dynamic Tool Slot Mapper: analyzing G-code (' + Math.round(content.length / 1024) + ' KB)...');
 
     let toolLibrary = loadToolLibrary();
     let manualMappings = {};
@@ -55,10 +55,12 @@ function onGcodeProgramLoad(content, context, settings) {
 
     const status = determineStatus(toolChanges);
 
-    // Dialog handles slot swaps in-place via /api/tools — only returns
-    // 'map' or 'bypass'. We reparse with the final sessionMappings before
-    // translating so the dialog never has to round-trip back on each edit.
-    const userChoice = showStatusDialog(
+    // Show dialog. The dialog does the heavy work in the browser (translation
+    // is browser-side to bypass Jint's 50 MB memory cap on large files), then
+    // uploads via /api/gcode-files/load-temp before closing. Plugin always
+    // returns the original content from here — the load-temp upload replaces
+    // the cached version with the transformed one a moment later.
+    showStatusDialog(
       context && context.filename,
       toolChanges,
       status,
@@ -66,23 +68,7 @@ function onGcodeProgramLoad(content, context, settings) {
       manualMappings
     );
 
-    const finalAction = typeof userChoice === 'string' ? userChoice : (userChoice && userChoice.action);
-
-    if (finalAction === 'bypass') {
-      safeLog('Tool mapping bypassed — loading original G-code');
-      return content;
-    }
-
-    // 'map': pick up the latest library state and any session mappings the user
-    // made in the dialog, then translate.
-    toolLibrary = loadToolLibrary();
-    if (userChoice && userChoice.sessionMappings !== undefined) {
-      manualMappings = userChoice.sessionMappings;
-    }
-    toolChanges = parseToolChanges(content, toolLibrary, manualMappings);
-
-    safeLog('Starting tool translation...');
-    return performTranslation(content, toolChanges);
+    return content;
 
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);
@@ -102,80 +88,10 @@ function safeLog(msg) {
   } catch (e) { /* swallow */ }
 }
 
-// === G-code translation ===
-// Uses content.replace(/^.*$/gm, fn) instead of split/mutate/join so we never
-// hold a parallel lines array — keeps peak memory under Jint's 50 MB cap on
-// large G-code files (50k+ lines).
-
-function performTranslation(content, toolChanges) {
-  const translationMap = {};
-  toolChanges.inMagazine.forEach(t => {
-    translationMap[t.toolNumber] = t.pocketNumber;
-  });
-
-  let translationCount = 0;
-  let commentTranslationCount = 0;
-
-  // Match ONLY lines containing T<digit>, H<digit>, or M6. Untranslatable
-  // lines (the vast majority of a 54k-line file) are not visited at all —
-  // .replace leaves them as-is. This keeps Jint cumulative allocations low.
-  const result = content.replace(/^[^\n]*(?:M0*6|T\d|H\d)[^\n]*$/gmi, function(line) {
-    if (!line) return line;
-
-    const trimmed = line.trim();
-    if (!trimmed) return line;
-
-    const firstChar = trimmed.charAt(0);
-
-    // Comment line: translate T## inside but tag with [Original: tool ##]
-    if (firstChar === '(' || firstChar === ';') {
-      const m = line.match(/T(\d+)/i);
-      if (m) {
-        const toolNumber = parseInt(m[1], 10);
-        const pocketNumber = translationMap[toolNumber];
-        if (pocketNumber !== undefined) {
-          commentTranslationCount++;
-          return line.replace(/T(\d+)/i, function(_, num) {
-            return 'T' + pocketNumber + ' [Original: tool ' + num + ']';
-          });
-        }
-      }
-      return line;
-    }
-
-    let out = line;
-    let wasTranslated = false;
-
-    const tm = line.match(/T(\d+)/i);
-    if (tm) {
-      const toolNumber = parseInt(tm[1], 10);
-      const pocketNumber = translationMap[toolNumber];
-      if (pocketNumber !== undefined) {
-        out = out.replace(/T\d+/i, 'T' + pocketNumber);
-        wasTranslated = true;
-        if (M6_PATTERN.test(line)) {
-          safeLog('  T' + toolNumber + ' → T' + pocketNumber);
-        }
-      }
-    }
-
-    const hm = out.match(/H(\d+)/i);
-    if (hm) {
-      const heightNumber = parseInt(hm[1], 10);
-      const pocketNumber = translationMap[heightNumber];
-      if (pocketNumber !== undefined) {
-        out = out.replace(/H\d+/i, 'H' + pocketNumber);
-        wasTranslated = true;
-      }
-    }
-
-    if (wasTranslated) translationCount++;
-    return out;
-  });
-
-  safeLog('✓ Translated ' + translationCount + ' tool change(s) and ' + commentTranslationCount + ' comment(s)');
-  return result;
-}
+// G-code translation has moved to the dialog (browser side) — see the
+// performTranslationInBrowser function inside the dialog HTML's <script>.
+// Browser memory is effectively unlimited, so files of any size translate
+// without hitting Jint's 50 MB cap.
 
 // === Tool library ===
 
@@ -971,11 +887,111 @@ function showStatusDialog(filename, toolChanges, status, toolLibrary, sessionMap
           }, '*');
         });
 
-        document.getElementById('mapBtn').addEventListener('click', () => {
-          window.parent.postMessage({
-            type: 'close-plugin-dialog',
-            data: { action: 'map', sessionMappings: sessionMappings }
-          }, '*');
+        // Browser-side translation: bypasses Jint's 50 MB memory cap on big
+        // files. Build map from current allToolsData (already reflects any
+        // slot edits the user made), download current G-code, transform via
+        // regex.replace, prepend marker, upload via /api/gcode-files/load-temp.
+        // The plugin's onGcodeProgramLoad sees the marker on the next call
+        // and skips, breaking what would otherwise be a re-processing loop.
+        function performTranslationInBrowser(content) {
+          const map = {};
+          allToolsData.forEach(t => {
+            if (t.statusClass === 'green' && t.pocketNumber !== null && t.pocketNumber !== undefined) {
+              map[t.toolNumber] = t.pocketNumber;
+            }
+          });
+
+          // Match only lines containing T<digit>, H<digit>, or M6.
+          // Untouched lines pass through unchanged.
+          return content.replace(/^[^\\n]*(?:M0*6|T\\d|H\\d)[^\\n]*$/gmi, function(line) {
+            if (!line) return line;
+            const trimmed = line.trim();
+            if (!trimmed) return line;
+
+            const firstChar = trimmed.charAt(0);
+
+            // Comment line: translate T## but tag with [Original: tool ##]
+            if (firstChar === '(' || firstChar === ';') {
+              const m = line.match(/T(\\d+)/i);
+              if (m) {
+                const toolNumber = parseInt(m[1], 10);
+                const pocket = map[toolNumber];
+                if (pocket !== undefined) {
+                  return line.replace(/T(\\d+)/i, function(_, num) {
+                    return 'T' + pocket + ' [Original: tool ' + num + ']';
+                  });
+                }
+              }
+              return line;
+            }
+
+            let out = line;
+            const tm = line.match(/T(\\d+)/i);
+            if (tm) {
+              const toolNumber = parseInt(tm[1], 10);
+              const pocket = map[toolNumber];
+              if (pocket !== undefined) {
+                out = out.replace(/T\\d+/i, 'T' + pocket);
+              }
+            }
+            const hm = out.match(/H(\\d+)/i);
+            if (hm) {
+              const heightNumber = parseInt(hm[1], 10);
+              const pocket = map[heightNumber];
+              if (pocket !== undefined) {
+                out = out.replace(/H\\d+/i, 'H' + pocket);
+              }
+            }
+            return out;
+          });
+        }
+
+        document.getElementById('mapBtn').addEventListener('click', async () => {
+          const mapBtn = document.getElementById('mapBtn');
+          const bypassBtn = document.getElementById('bypassBtn');
+          mapBtn.disabled = true;
+          bypassBtn.disabled = true;
+          mapBtn.textContent = 'Translating…';
+
+          try {
+            const r = await fetch('/api/gcode-files/current/download');
+            if (!r.ok) throw new Error('Failed to download G-code: HTTP ' + r.status);
+            const content = await r.text();
+
+            const transformed = '${DTSM_MARKER}\\n' + performTranslationInBrowser(content);
+
+            // Look up current filename + sourceFile so load-temp gets the right metadata.
+            const stateRes = await fetch('/api/server-state');
+            const state = stateRes.ok ? await stateRes.json() : {};
+            const filename = (state.jobLoaded && state.jobLoaded.filename) || 'translated.gcode';
+            const sourceFile = (state.jobLoaded && state.jobLoaded.sourceFile) || null;
+
+            // CRITICAL: schedule the load-temp upload via setTimeout(0) so it
+            // fires AFTER the close-plugin-dialog message releases the engine
+            // lock. Otherwise load-temp's plugin-transform call would block
+            // forever waiting for the lock that is currently held by the very
+            // onGcodeProgramLoad call that's waiting for this dialog to close.
+            setTimeout(() => {
+              fetch('/api/gcode-files/load-temp', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: transformed, filename: filename, sourceFile: sourceFile })
+              }).catch(err => {
+                console.error('[DTSM dialog] Upload failed:', err);
+              });
+            }, 0);
+
+            // Now release the engine lock by closing the dialog.
+            window.parent.postMessage({
+              type: 'close-plugin-dialog',
+              data: { action: 'map' }
+            }, '*');
+          } catch (err) {
+            mapBtn.disabled = false;
+            bypassBtn.disabled = false;
+            mapBtn.textContent = 'Map Tools';
+            alert('Translation failed: ' + (err && err.message ? err.message : err));
+          }
         });
       })();
     <\/script>
