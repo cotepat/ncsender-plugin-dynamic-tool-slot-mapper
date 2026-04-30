@@ -28,40 +28,26 @@ function onGcodeProgramLoad(content, context, settings) {
   pluginContext.log('Dynamic Tool Slot Mapper: analyzing G-code...');
 
   let toolLibrary = loadToolLibrary();
-  const lines = content.split('\n');
   let manualMappings = {};
-  let toolChanges = parseToolChanges(lines, toolLibrary, manualMappings);
+  let toolChanges = parseToolChanges(content, toolLibrary, manualMappings);
 
   if (toolChanges.allTools.length === 0) {
-    pluginContext.log('No tool changes found in G-code');
+    pluginContext.log('No tool changes found — loading original G-code');
     return content;
   }
 
-  let status = determineStatus(toolChanges);
+  const status = determineStatus(toolChanges);
 
-  let userChoice;
-  while (true) {
-    userChoice = showStatusDialog(
-      context && context.filename,
-      toolChanges,
-      status,
-      toolLibrary,
-      manualMappings
-    );
-
-    const action = typeof userChoice === 'string' ? userChoice : (userChoice && userChoice.action);
-
-    if (action === 'refresh') {
-      toolLibrary = loadToolLibrary();
-      if (userChoice && userChoice.sessionMappings !== undefined) {
-        manualMappings = userChoice.sessionMappings;
-      }
-      toolChanges = parseToolChanges(lines, toolLibrary, manualMappings);
-      status = determineStatus(toolChanges);
-      continue;
-    }
-    break;
-  }
+  // Dialog handles slot swaps in-place via /api/tools — only returns
+  // 'map' or 'bypass'. We reparse with the final sessionMappings before
+  // translating so the dialog never has to round-trip back on each edit.
+  const userChoice = showStatusDialog(
+    context && context.filename,
+    toolChanges,
+    status,
+    toolLibrary,
+    manualMappings
+  );
 
   const finalAction = typeof userChoice === 'string' ? userChoice : (userChoice && userChoice.action);
 
@@ -70,20 +56,105 @@ function onGcodeProgramLoad(content, context, settings) {
     return content;
   }
 
+  // 'map': pick up the latest library state and any session mappings the user
+  // made in the dialog, then translate.
+  toolLibrary = loadToolLibrary();
+  if (userChoice && userChoice.sessionMappings !== undefined) {
+    manualMappings = userChoice.sessionMappings;
+  }
+  toolChanges = parseToolChanges(content, toolLibrary, manualMappings);
+
   pluginContext.log('Starting tool translation...');
-  return performTranslation(lines, toolChanges);
+  return performTranslation(content, toolChanges);
+}
+
+// === G-code translation ===
+// Uses content.replace(/^.*$/gm, fn) instead of split/mutate/join so we never
+// hold a parallel lines array — keeps peak memory under Jint's 50 MB cap on
+// large G-code files (50k+ lines).
+
+function performTranslation(content, toolChanges) {
+  const translationMap = {};
+  toolChanges.inMagazine.forEach(t => {
+    translationMap[t.toolNumber] = t.pocketNumber;
+  });
+
+  let translationCount = 0;
+  let commentTranslationCount = 0;
+
+  // Match ONLY lines containing T<digit>, H<digit>, or M6. Untranslatable
+  // lines (the vast majority of a 54k-line file) are not visited at all —
+  // .replace leaves them as-is. This keeps Jint cumulative allocations low.
+  const result = content.replace(/^[^\n]*(?:M0*6|T\d|H\d)[^\n]*$/gmi, function(line) {
+    if (!line) return line;
+
+    const trimmed = line.trim();
+    if (!trimmed) return line;
+
+    const firstChar = trimmed.charAt(0);
+
+    // Comment line: translate T## inside but tag with [Original: tool ##]
+    if (firstChar === '(' || firstChar === ';') {
+      const m = line.match(/T(\d+)/i);
+      if (m) {
+        const toolNumber = parseInt(m[1], 10);
+        const pocketNumber = translationMap[toolNumber];
+        if (pocketNumber !== undefined) {
+          commentTranslationCount++;
+          return line.replace(/T(\d+)/i, function(_, num) {
+            return 'T' + pocketNumber + ' [Original: tool ' + num + ']';
+          });
+        }
+      }
+      return line;
+    }
+
+    let out = line;
+    let wasTranslated = false;
+
+    const tm = line.match(/T(\d+)/i);
+    if (tm) {
+      const toolNumber = parseInt(tm[1], 10);
+      const pocketNumber = translationMap[toolNumber];
+      if (pocketNumber !== undefined) {
+        out = out.replace(/T\d+/i, 'T' + pocketNumber);
+        wasTranslated = true;
+        if (M6_PATTERN.test(line)) {
+          pluginContext.log('  T' + toolNumber + ' → T' + pocketNumber);
+        }
+      }
+    }
+
+    const hm = out.match(/H(\d+)/i);
+    if (hm) {
+      const heightNumber = parseInt(hm[1], 10);
+      const pocketNumber = translationMap[heightNumber];
+      if (pocketNumber !== undefined) {
+        out = out.replace(/H\d+/i, 'H' + pocketNumber);
+        wasTranslated = true;
+      }
+    }
+
+    if (wasTranslated) translationCount++;
+    return out;
+  });
+
+  pluginContext.log('✓ Translated ' + translationCount + ' tool change(s) and ' + commentTranslationCount + ' comment(s)');
+  return result;
 }
 
 // === Tool library ===
 
 function loadToolLibrary() {
+  if (typeof pluginContext === 'undefined' || !pluginContext) {
+    throw new Error('pluginContext is not defined — host did not inject the plugin context');
+  }
   if (typeof pluginContext.getTools !== 'function') {
     throw new Error('pluginContext.getTools is not available — host needs ncSender 2.0.37+ (OSS) or 2.0.88+ (Pro)');
   }
 
   const tools = pluginContext.getTools();
   const library = {};
-
   if (!Array.isArray(tools)) return library;
 
   tools.forEach(tool => {
@@ -96,37 +167,35 @@ function loadToolLibrary() {
     }
   });
 
-  pluginContext.log(`Loaded ${tools.length} tool(s) from library`);
+  pluginContext.log('Loaded ' + tools.length + ' tool(s) from library');
   return library;
 }
 
 // === Parse tool changes ===
 
-function parseToolChanges(lines, toolLibrary, manualMappings) {
+function parseToolChanges(content, toolLibrary, manualMappings) {
   manualMappings = manualMappings || {};
   const allTools = [];
   const inLibrary = [];
   const inMagazine = [];
   const notInMagazine = [];
   const unknownTools = [];
-
   const seenTools = {};
 
-  lines.forEach((line, index) => {
-    if (!line.trim()) return;
-
-    const trimmed = line.trim();
-    if (trimmed.charAt(0) === ';') return;
-    if (trimmed.charAt(0) === '(' && trimmed.charAt(trimmed.length - 1) === ')') return;
-
-    const match = trimmed.match(M6_PATTERN);
-    if (!match) return;
-
-    const toolNumberStr = match[1] || match[2];
-    if (!toolNumberStr) return;
+  // Match ONLY lines containing a tool change. Anchored with /gm so ^ is
+  // start-of-line, with a negative lookahead to skip comment lines. This way
+  // we don't visit / allocate per non-matching line — Jint counts cumulative
+  // allocations and 54k+ line files would exhaust the 50MB cap otherwise.
+  //
+  // Captures: group 1 = tool# from "M6 T##", group 2 = tool# from "T## M6"
+  const TOOL_CHANGE_RE = /^(?!\s*[;(])[^\n]*?(?:M0*6\s*T0*(\d+)|T0*(\d+)\s*M0*6)/gmi;
+  let m;
+  while ((m = TOOL_CHANGE_RE.exec(content)) !== null) {
+    const toolNumberStr = m[1] || m[2];
+    if (!toolNumberStr) continue;
 
     const toolNumber = parseInt(toolNumberStr, 10);
-    if (seenTools[toolNumber]) return;
+    if (seenTools[toolNumber]) continue;
     seenTools[toolNumber] = true;
 
     const toolNumberKey = String(toolNumber);
@@ -135,7 +204,6 @@ function parseToolChanges(lines, toolLibrary, manualMappings) {
 
     const toolInfo = toolLibrary[toolNumber];
     const toolData = {
-      line: index + 1,
       toolNumber: toolNumber,
       toolInfo: toolInfo,
       manualMapping: hasManualMapping
@@ -153,7 +221,6 @@ function parseToolChanges(lines, toolLibrary, manualMappings) {
       }
     } else if (toolInfo) {
       inLibrary.push(toolData);
-
       if (toolInfo.toolNumber !== null && toolInfo.toolNumber !== undefined) {
         toolData.pocketNumber = toolInfo.toolNumber;
         inMagazine.push(toolData);
@@ -163,7 +230,7 @@ function parseToolChanges(lines, toolLibrary, manualMappings) {
     } else {
       unknownTools.push(toolData);
     }
-  });
+  }
 
   return {
     allTools: allTools,
@@ -180,82 +247,6 @@ function determineStatus(toolChanges) {
   if (toolChanges.unknownTools.length > 0) return 'red';
   if (toolChanges.notInMagazine.length > 0) return 'yellow';
   return 'green';
-}
-
-// === G-code translation ===
-
-function performTranslation(lines, toolChanges) {
-  const translationMap = {};
-  toolChanges.inMagazine.forEach(t => {
-    translationMap[t.toolNumber] = t.pocketNumber;
-  });
-
-  let translationCount = 0;
-  let commentTranslationCount = 0;
-
-  // In-place mutation to avoid allocating a parallel translatedLines array
-  // (large G-code files were hitting Jint's 50 MB LimitMemory).
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line) continue;
-
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-
-    const firstChar = trimmed.charAt(0);
-
-    if (firstChar === '(' || firstChar === ';') {
-      // Comment: translate T## and tag with [Original: tool ##]
-      const toolMatch = line.match(/T(\d+)/i);
-      if (toolMatch) {
-        const toolNumber = parseInt(toolMatch[1], 10);
-        const pocketNumber = translationMap[toolNumber];
-        if (pocketNumber !== undefined) {
-          lines[i] = line.replace(/T(\d+)/i, (m, num) => `T${pocketNumber} [Original: tool ${num}]`);
-          commentTranslationCount++;
-        }
-      }
-      continue;
-    }
-
-    // Fast skip: lines without any T or H letter can't have a translation.
-    if (line.indexOf('T') < 0 && line.indexOf('t') < 0 && line.indexOf('H') < 0 && line.indexOf('h') < 0) continue;
-
-    let out = line;
-    let wasTranslated = false;
-
-    const toolMatch = line.match(/T(\d+)/i);
-    if (toolMatch) {
-      const toolNumber = parseInt(toolMatch[1], 10);
-      const pocketNumber = translationMap[toolNumber];
-      if (pocketNumber !== undefined) {
-        out = out.replace(/T\d+/i, `T${pocketNumber}`);
-        wasTranslated = true;
-        if (M6_PATTERN.test(line)) {
-          pluginContext.log(`  T${toolNumber} → T${pocketNumber}`);
-        }
-      }
-    }
-
-    const heightMatch = out.match(/H(\d+)/i);
-    if (heightMatch) {
-      const heightNumber = parseInt(heightMatch[1], 10);
-      const pocketNumber = translationMap[heightNumber];
-      if (pocketNumber !== undefined) {
-        out = out.replace(/H\d+/i, `H${pocketNumber}`);
-        wasTranslated = true;
-      }
-    }
-
-    if (wasTranslated) {
-      lines[i] = out;
-      translationCount++;
-    }
-  }
-
-  pluginContext.log(`✓ Translated ${translationCount} tool change(s) and ${commentTranslationCount} comment(s)`);
-
-  return lines.join('\n');
 }
 
 // === Status dialog ===
@@ -533,13 +524,13 @@ function showStatusDialog(filename, toolChanges, status, toolLibrary, sessionMap
     <div class="status-container">
       <div class="status-header">
         <div class="status-filename">${filename || 'G-Code File'}</div>
-        <div class="status-banner">
-          <span>${config.icon}</span>
-          <span>${config.title}</span>
+        <div class="status-banner" id="statusBanner">
+          <span id="statusIcon">${config.icon}</span>
+          <span id="statusTitle">${config.title}</span>
         </div>
       </div>
 
-      <div class="status-message">${config.message}</div>
+      <div class="status-message" id="statusMessage">${config.message}</div>
 
       <div id="slotCarousel" class="slot-carousel-section">
         <span class="slot-carousel-loading">Loading slots…</span>
@@ -556,27 +547,7 @@ function showStatusDialog(filename, toolChanges, status, toolLibrary, sessionMap
               <th>Status</th>
             </tr>
           </thead>
-          <tbody>
-            ${allToolsForTable.map(t => {
-              const slotBadge = (t.pocketNumber !== null && t.pocketNumber !== undefined)
-                ? `<span class="tool-number-badge">Slot${t.pocketNumber}</span>`
-                : `<span class="tool-slot-placeholder">No Slot</span>`;
-              return `
-                <tr class="tool-row tool-row--${t.statusClass}">
-                  <td>
-                    <div class="tool-id-cell">
-                      <span class="tool-id-text">${t.toolNumber}</span>
-                      ${slotBadge}
-                    </div>
-                  </td>
-                  <td>${t.toolInfo ? t.toolInfo.name : `Tool ${t.toolNumber}`}</td>
-                  <td>${t.toolInfo ? t.toolInfo.type : '-'}</td>
-                  <td>${t.toolInfo ? t.toolInfo.diameter.toFixed(2) + ' mm' : '-'}</td>
-                  <td><span class="row-status-badge row-status-badge--${t.statusClass}">${t.statusLabel}</span></td>
-                </tr>
-              `;
-            }).join('')}
-          </tbody>
+          <tbody id="toolsTableBody"></tbody>
         </table>
       </div>
 
@@ -795,20 +766,139 @@ function showStatusDialog(filename, toolChanges, status, toolLibrary, sessionMap
               }
             }
 
-            // Small delay for /api/tools writes to settle, then refresh dialog
+            // Small delay for /api/tools writes to settle, then refresh in place
             await new Promise(resolve => setTimeout(resolve, 100));
-
-            window.parent.postMessage({
-              type: 'close-plugin-dialog',
-              data: { action: 'refresh', sessionMappings: sessionMappings }
-            }, '*');
+            await refreshFromServer();
 
           } catch (error) {
             alert('Failed to update slot: ' + (error && error.message ? error.message : error));
           }
         }
 
-        // Init: fetch magazine size, then render carousel
+        // === In-place refresh helpers ===
+        // Re-fetch the tool library, recompute each row's status, then re-render
+        // the carousel + table + status banner without closing the dialog.
+
+        async function refreshFromServer() {
+          try {
+            const r = await fetch('/api/tools');
+            if (!r.ok) return;
+            const tools = await r.json();
+
+            // Rebuild local toolLibrary in place
+            for (const k in toolLibrary) delete toolLibrary[k];
+            tools.forEach(t => {
+              const tid = (t.toolId !== undefined && t.toolId !== null) ? t.toolId : t.id;
+              if (tid !== undefined && tid !== null) {
+                toolLibrary[tid] = Object.assign({}, t, { toolId: tid });
+              }
+            });
+
+            // Re-resolve every row in allToolsData based on fresh library + sessionMappings
+            allToolsData.forEach(item => {
+              const k = String(item.toolNumber);
+              const hasSession = Object.prototype.hasOwnProperty.call(sessionMappings, k);
+              const libTool = toolLibrary[item.toolNumber];
+
+              if (hasSession) {
+                const sp = sessionMappings[k];
+                if (sp !== -1) {
+                  item.toolInfo = libTool || null;
+                  item.pocketNumber = sp;
+                  item.statusClass = 'green';
+                  item.statusLabel = 'Ready';
+                } else {
+                  item.toolInfo = libTool || null;
+                  item.pocketNumber = undefined;
+                  item.statusClass = libTool ? 'yellow' : 'red';
+                  item.statusLabel = libTool ? 'No Slot' : 'Unknown';
+                }
+              } else if (libTool) {
+                item.toolInfo = libTool;
+                if (libTool.toolNumber !== null && libTool.toolNumber !== undefined) {
+                  item.pocketNumber = libTool.toolNumber;
+                  item.statusClass = 'green';
+                  item.statusLabel = 'Ready';
+                } else {
+                  item.pocketNumber = undefined;
+                  item.statusClass = 'yellow';
+                  item.statusLabel = 'No Slot';
+                }
+              } else {
+                item.toolInfo = null;
+                item.pocketNumber = undefined;
+                item.statusClass = 'red';
+                item.statusLabel = 'Unknown';
+              }
+            });
+
+            renderCarousel();
+            renderTable();
+            updateStatusBanner();
+          } catch (e) {
+            // ignore refresh failures — user can retry
+          }
+        }
+
+        function renderTable() {
+          const tbody = document.getElementById('toolsTableBody');
+          if (!tbody) return;
+
+          tbody.innerHTML = allToolsData.map(t => {
+            const slotBadge = (t.pocketNumber !== null && t.pocketNumber !== undefined)
+              ? \`<span class="tool-number-badge">Slot\${t.pocketNumber}</span>\`
+              : \`<span class="tool-slot-placeholder">No Slot</span>\`;
+            const desc = t.toolInfo ? t.toolInfo.name : 'Tool ' + t.toolNumber;
+            const type = t.toolInfo ? t.toolInfo.type : '-';
+            const dia = t.toolInfo ? (t.toolInfo.diameter.toFixed(2) + ' mm') : '-';
+            return \`<tr class="tool-row tool-row--\${t.statusClass}">
+              <td><div class="tool-id-cell">
+                <span class="tool-id-text">\${t.toolNumber}</span>
+                \${slotBadge}
+              </div></td>
+              <td>\${desc}</td>
+              <td>\${type}</td>
+              <td>\${dia}</td>
+              <td><span class="row-status-badge row-status-badge--\${t.statusClass}">\${t.statusLabel}</span></td>
+            </tr>\`;
+          }).join('');
+        }
+
+        function updateStatusBanner() {
+          const unknownCount = allToolsData.filter(t => t.statusClass === 'red').length;
+          const unmappedCount = allToolsData.filter(t => t.statusClass === 'yellow').length;
+          const status = unknownCount > 0 ? 'red' : (unmappedCount > 0 ? 'yellow' : 'green');
+
+          const cfg = {
+            red: { color: '#dc3545', bg: 'rgba(220, 53, 69, 0.1)', icon: '🔴', title: 'Tools Not Found in Library', msg: unknownCount + ' tool(s) are not in your ncSender library. If you proceed with "Map Tools", tools that exist will be mapped - unknown tools will remain as-is.' },
+            yellow: { color: '#ffc107', bg: 'rgba(255, 193, 7, 0.1)', icon: '🟡', title: 'Manual Tool Changes Required', msg: unmappedCount + ' tool(s) are in ncSender library but not assigned to slots. These will require manual tool changes.' },
+            green: { color: '#28a745', bg: 'rgba(40, 167, 69, 0.1)', icon: '🟢', title: 'All Tools Ready for ATC', msg: 'All tools are in ncSender library and assigned to slots. Original tool numbers will be mapped to ncSender slots.' }
+          }[status];
+
+          const banner = document.getElementById('statusBanner');
+          if (banner) {
+            banner.style.background = cfg.bg;
+            banner.style.borderColor = cfg.color;
+            banner.style.color = cfg.color;
+          }
+          const iconEl = document.getElementById('statusIcon');
+          if (iconEl) iconEl.textContent = cfg.icon;
+          const titleEl = document.getElementById('statusTitle');
+          if (titleEl) titleEl.textContent = cfg.title;
+          const msgEl = document.getElementById('statusMessage');
+          if (msgEl) msgEl.textContent = cfg.msg;
+
+          const mapBtn = document.getElementById('mapBtn');
+          if (mapBtn) {
+            mapBtn.classList.remove('btn-success', 'btn-warning', 'btn-primary');
+            mapBtn.classList.add(status === 'green' ? 'btn-success' : (status === 'yellow' ? 'btn-warning' : 'btn-primary'));
+          }
+        }
+
+        // Init: render table now (was pre-rendered before, now JS-driven so it
+        // can be re-rendered in place after slot edits). Then fetch magazine
+        // size and render the carousel once we know it.
+        renderTable();
         fetchMagazineSize().then(size => {
           magazineSize = size;
           renderCarousel();
@@ -817,11 +907,19 @@ function showStatusDialog(filename, toolChanges, status, toolLibrary, sessionMap
         overlay.addEventListener('click', closeSlotSelector);
         popup.addEventListener('click', e => e.stopPropagation());
 
-        document.querySelectorAll('.tool-id-cell').forEach((cell, index) => {
-          cell.addEventListener('click', e => {
-            showSlotSelector(allToolsData[index], e);
+        // Event delegation on tbody so re-rendered rows still respond to clicks.
+        const toolsTableBody = document.getElementById('toolsTableBody');
+        if (toolsTableBody) {
+          toolsTableBody.addEventListener('click', e => {
+            const cell = e.target.closest('.tool-id-cell');
+            if (!cell) return;
+            const tr = cell.closest('tr');
+            const index = Array.from(toolsTableBody.children).indexOf(tr);
+            if (index >= 0 && allToolsData[index]) {
+              showSlotSelector(allToolsData[index], e);
+            }
           });
-        });
+        }
 
         listContainer.addEventListener('click', e => {
           const item = e.target.closest('.slot-selector-item');
@@ -842,12 +940,16 @@ function showStatusDialog(filename, toolChanges, status, toolLibrary, sessionMap
         document.getElementById('mapBtn').addEventListener('click', () => {
           window.parent.postMessage({
             type: 'close-plugin-dialog',
-            data: { action: 'map' }
+            data: { action: 'map', sessionMappings: sessionMappings }
           }, '*');
         });
       })();
     <\/script>
   `;
+
+  if (typeof pluginContext.showDialog !== 'function') {
+    throw new Error('pluginContext.showDialog is not available — host needs ncSender 2.0.37+ (OSS) or 2.0.88+ (Pro)');
+  }
 
   const response = pluginContext.showDialog('Dynamic Tool Slot Mapper (Tool Mapping Summary)', html, { closable: false });
 
