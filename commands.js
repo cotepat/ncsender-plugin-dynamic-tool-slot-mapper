@@ -982,15 +982,29 @@ function showStatusDialog(filename, sourcePath, toolChanges, status, toolLibrary
             // lock. Otherwise load-temp's plugin-transform call would block
             // forever waiting for the lock that is currently held by the very
             // onGcodeProgramLoad call that's waiting for this dialog to close.
-            setTimeout(() => {
+            //
+            // Race: on Windows, the original LoadFileAsync's File.WriteAllTextAsync
+            // and our load-temp's File.WriteAllTextAsync both write to
+            // current.gcode. Windows holds an exclusive file lock during write,
+            // so concurrent writes fail with "file in use". Retry with backoff
+            // — the original write completes in <1s typically.
+            const payload = { content: transformed, filename: filename, sourceFile: sourcePath || null };
+            const delays = [0, 250, 500, 1000, 2000, 4000];
+            function attempt(i) {
               fetch('/api/gcode-files/load-temp', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content: transformed, filename: filename, sourceFile: sourcePath || null })
+                body: JSON.stringify(payload)
+              }).then(r => {
+                if (r.ok) return;
+                if (i + 1 < delays.length) setTimeout(() => attempt(i + 1), delays[i + 1]);
+                else console.error('[DTSM dialog] load-temp failed after retries: HTTP ' + r.status);
               }).catch(err => {
-                console.error('[DTSM dialog] Upload failed:', err);
+                if (i + 1 < delays.length) setTimeout(() => attempt(i + 1), delays[i + 1]);
+                else console.error('[DTSM dialog] load-temp failed after retries:', err);
               });
-            }, 0);
+            }
+            setTimeout(() => attempt(0), delays[0]);
 
             // Now release the engine lock by closing the dialog.
             window.parent.postMessage({

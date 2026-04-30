@@ -1,10 +1,12 @@
-# Dynamic Tool Slot Mapper v2.1.1
+# Dynamic Tool Slot Mapper v2.1.2
 
-## 🐛 Hotfix: Map Tools translated the wrong file
+## 🐛 Hotfix: Windows file-write race
 
-v2.1.0's browser-side translation fetched the G-code from `/api/gcode-files/current/download`, but that endpoint serves the **cached** version of the previously-loaded file. The plugin shows the dialog *before* the cache is updated for the new file (because the plugin is blocking the load), so Map Tools translated whatever was loaded last and uploaded that — leaving the file the user actually wanted untranslated.
+On Windows, when Map Tools fired the load-temp upload too quickly, it raced with the original `LoadFileAsync`'s write to `current.gcode`. Windows holds an exclusive file lock during write, so the second writer crashed with `IOException: The process cannot access the file because it is being used by another process` (visible only in Kestrel logs, not in the plugin's own log).
 
-Fix: dialog now fetches fresh from disk via `/api/gcode-files/file?path=<sourcePath>` — always the file the user is loading, never stale cache content.
+Linux/macOS aren't affected — those kernels serialize writes transparently — but Windows users would see the file load with the *original* untranslated content because the load-temp upload failed.
+
+Fix: the dialog now retries the load-temp request on failure with exponential backoff (0ms, 250ms, 500ms, 1s, 2s, 4s — total ~7.7s). The original write typically completes in well under 1s, so retries succeed within 1-2 attempts.
 
 ## Requirements
 
@@ -13,4 +15,4 @@ Fix: dialog now fetches fresh from disk via `/api/gcode-files/file?path=<sourceP
 
 ---
 
-**Full Changelog**: https://github.com/cotepat/ncsender-plugin-dynamic-tool-slot-mapper/compare/v2.1.0...v2.1.1
+**Full Changelog**: https://github.com/cotepat/ncsender-plugin-dynamic-tool-slot-mapper/compare/v2.1.1...v2.1.2
